@@ -1,0 +1,6 @@
+{
+  "name": "desk-pet",
+  "version": "0.1.0",
+  "description": "Claude 娘桌宠悬浮窗 + Token/缓存命中率状态栏 + 完成提示音",
+  "types": "./types/index.d.ts"
+}

@@ -1,0 +1,6 @@
+{
+  "name": "claude-desk-pet",
+  "owner": { "name": "claude-desk-pet contributors" },
+  "description": "Claude 娘桌宠：悬浮窗 + Token 状态栏 + 提示音",
+  "plugins": [{ "name": "desk-pet", "source": "./" }]
+}
