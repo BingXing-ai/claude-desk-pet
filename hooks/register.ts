@@ -1,6 +1,12 @@
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { Totals } from '../types'
+// 累计的 token 用量（四类分开记，命中率 = 缓存读取 / 全部输入）
+type Totals = {
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+}
 
 // 桌宠的状态（悬浮窗程序按这个名字换表情）
 type PetState = 'thinking' | 'tool' | 'reading' | 'waiting' | 'celebrate' | 'error' | 'aborted' | 'stone'
@@ -14,8 +20,9 @@ type Usage = {
   cache_creation_input_tokens: number
 }
 
-const SESSION = { plugin: 'desk-pet', key: 'session' } as const
-const LAST_COST = { plugin: 'desk-pet', key: 'lastCost' } as const
+// 本会话的记账：totals 是累计用量，lastCost 是上次记账时的会话花费（美元），用来算项目累计的增量
+// 存在 $.store 里按会话 id 分开（不用 $.state，那样 plugin.json 就不需要 types 字段，旧版本也能装）
+type SessionRecord = { totals: Totals; lastCost: number }
 const EMPTY: Totals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
 
 // 读资料类工具 → 记笔记表情；其余 → 敲键盘
@@ -26,6 +33,7 @@ let runDir = ''
 let petFile = ''
 let project = ''
 let cwd = ''
+let sessionKey = ''
 let toolErrors = 0
 
 const fmt = (n: number) =>
@@ -49,6 +57,10 @@ const describe = (tool: string, input: Record<string, unknown>) => {
   if (tool === 'Agent') return '派小助手干活中'
   if (tool.startsWith('mcp__')) return `在用 ${tool.split('__').pop()}`
   return `在用 ${tool}`
+}
+
+async function readSession($: EngineInterface) {
+  return ((await $.store.get(sessionKey)) as SessionRecord | undefined) ?? { totals: EMPTY, lastCost: 0 }
 }
 
 // 写状态文件给悬浮窗读；sound 让悬浮窗播放提示音（引擎在 Windows 上没有播放器）
@@ -79,7 +91,7 @@ async function launchPet($: EngineInterface) {
 }
 
 async function refreshStatus($: EngineInterface) {
-  const { value: t = EMPTY } = await $.state.get(SESSION)
+  const t = (await readSession($)).totals
   const usage = await $.session.usage()
   const parts = [
     `📊 本会话 输入 ${fmt(t.input + t.cacheRead + t.cacheWrite)}`,
@@ -95,21 +107,22 @@ async function refreshStatus($: EngineInterface) {
 
 // 把本轮用量记进会话累计和项目累计（项目累计跨会话保存）
 async function account($: EngineInterface, u: Usage | undefined) {
-  const { value: t = EMPTY } = await $.state.get(SESSION)
+  const { totals: t, lastCost } = await readSession($)
   const add: Totals = u
     ? { input: u.input_tokens, output: u.output_tokens, cacheRead: u.cache_read_input_tokens, cacheWrite: u.cache_creation_input_tokens }
     : EMPTY
-  await $.state.set(SESSION, {
-    input: t.input + add.input,
-    output: t.output + add.output,
-    cacheRead: t.cacheRead + add.cacheRead,
-    cacheWrite: t.cacheWrite + add.cacheWrite,
-  })
-
   const usage = await $.session.usage()
   const cost = usage.cost?.usd ?? 0
-  const { value: lastCost = 0 } = await $.state.get(LAST_COST)
-  await $.state.set(LAST_COST, cost)
+  const record: SessionRecord = {
+    totals: {
+      input: t.input + add.input,
+      output: t.output + add.output,
+      cacheRead: t.cacheRead + add.cacheRead,
+      cacheWrite: t.cacheWrite + add.cacheWrite,
+    },
+    lastCost: cost,
+  }
+  await $.store.set(sessionKey, record)
 
   const key = `project:${cwd}`
   const p = ((await $.store.get(key)) as ProjectTotals | undefined) ?? { ...EMPTY, costUsd: 0, sessions: 1 }
@@ -124,7 +137,7 @@ async function account($: EngineInterface, u: Usage | undefined) {
 }
 
 async function statsText($: EngineInterface) {
-  const { value: t = EMPTY } = await $.state.get(SESSION)
+  const t = (await readSession($)).totals
   const p = (await $.store.get(`project:${cwd}`)) as ProjectTotals | undefined
   const usage = await $.session.usage()
   const line = (name: string, x: Totals) =>
@@ -149,12 +162,13 @@ export const register: Register = on => {
     // 运行目录放在 ~/.claude/desk-pet，不放进 mod 文件夹（避免触发热重载）
     const home = ((await $.env.get('USERPROFILE')) ?? (await $.env.get('HOME')) ?? '').replace(/\\/g, '/')
     runDir = `${home}/.claude/desk-pet`
-    petFile = `${runDir}/sessions/${await $.session.id()}.json`
+    const sessionId = await $.session.id()
+    petFile = `${runDir}/sessions/${sessionId}.json`
+    sessionKey = `session:${sessionId}`
 
     // 新会话在项目累计里记一次
-    const { value: seen } = await $.state.get(SESSION)
-    if (seen === undefined) {
-      await $.state.set(SESSION, EMPTY)
+    if ((await $.store.get(sessionKey)) === undefined) {
+      await $.store.set(sessionKey, { totals: EMPTY, lastCost: 0 })
       const key = `project:${cwd}`
       const p = (await $.store.get(key)) as ProjectTotals | undefined
       if (p) await $.store.set(key, { ...p, sessions: p.sessions + 1 })
