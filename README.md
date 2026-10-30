@@ -37,6 +37,8 @@
 
 ## 运行要求
 
+> 🍎 **macOS 用户**：这个仓库目前只支持 Windows，请使用 [wangmeng003](https://github.com/wangmeng003) 维护的 Mac 移植版：[claude-desk-pet-mac](https://github.com/wangmeng003/claude-desk-pet-mac)
+
 - **Windows**（悬浮窗和提示音用的是 Windows 的接口）
 - **Python 3**，并且在命令行里输入 `python` 能直接运行
 - **Pillow** 图像库，用下面这条命令安装：
@@ -78,3 +80,4 @@ claude plugin install desk-pet --marketplace BingXing-ai/claude-desk-pet
 - 这是个人粉丝作品，与 Anthropic 官方无关
 - 立绘由作者用 AI 绘图生成，最初是为自己的视频做的素材
 - 代码使用 MIT 许可证，详见 [LICENSE](LICENSE)
+- 感谢 [wangmeng003](https://github.com/wangmeng003) 移植了 [macOS 版](https://github.com/wangmeng003/claude-desk-pet-mac)
