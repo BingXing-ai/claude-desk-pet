@@ -102,7 +102,7 @@ async function launchPet($: EngineInterface) {
 type Lang = 'zh' | 'en'
 const STATUS_TEXT = {
   zh: { session: '当前会话', input: '输入', output: '输出', cacheHit: '缓存命中', context: '上下文', fiveHour: '5h额度' },
-  en: { session: 'Session:', input: 'input', output: 'output', cacheHit: 'cache hit', context: 'context', fiveHour: '5h limit' },
+  en: { session: 'Session', input: 'Input', output: 'Output', cacheHit: 'Cache hit', context: 'Context', fiveHour: '5h Limit' },
 }
 
 // 系统语言是中文就用中文，否则用英文

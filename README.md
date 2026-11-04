@@ -30,7 +30,7 @@
 
 英文版：
 
-> Session: input 12.3k · output 4.1k · cache hit 87% · context 31% · 5h limit 23%
+> Session Input 12.3k · Output 4.1k · Cache hit 87% · Context 31% · 5h Limit 23%
 
 默认跟随系统语言，也可以在桌宠右键菜单的「状态栏语言 / Language」里切换
 
