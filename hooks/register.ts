@@ -54,9 +54,17 @@ const describe = (tool: string, input: Record<string, unknown>) => {
   if (tool === 'Read') return file ? `在读 ${file}` : '在翻文件…'
   if (tool === 'Grep' || tool === 'Glob') return '在找东西…'
   if (tool === 'WebSearch' || tool === 'WebFetch') return '在上网查…'
-  if (tool === 'Agent') return '派小助手干活中'
-  if (tool.startsWith('mcp__')) return `在用 ${tool.split('__').pop()}`
-  return `在用 ${tool}`
+  if (tool === 'Agent' || tool === 'Task') return '派小助手干活中…'
+  if (tool.startsWith('mcp__')) return describeMcp(tool)
+  return `在用 ${tool}…`
+}
+
+// MCP 工具名形如 mcp__<服务名>__<工具名>，服务名有时是一串 id，直接显示不好看
+const describeMcp = (tool: string) => {
+  const [, server = '', name = ''] = tool.split('__')
+  if (/browser|chrome|playwright|puppeteer/i.test(server)) return '在操作浏览器…'
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(server) || !server) return name ? `在用 ${name}…` : '在用扩展工具…'
+  return `在用 ${server}…`
 }
 
 async function readSession($: EngineInterface) {
@@ -186,7 +194,7 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       toolErrors = 0
-      await pet($, 'thinking', '思考中')
+      await pet($, 'thinking', '思考中…')
     }
     return next(e)
   })
@@ -208,7 +216,7 @@ export const register: Register = on => {
         else await pet($, 'error', '出错了…')
       } else {
         toolErrors = 0
-        await pet($, 'thinking', '思考中')
+        await pet($, 'thinking', '思考中…')
       }
     }
     return ran
