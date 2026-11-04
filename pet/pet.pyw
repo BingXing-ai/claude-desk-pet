@@ -446,6 +446,12 @@ class Pet:
         self.menu.add_checkbutton(label='切到 Claude 时自动隐藏', variable=self.hide_var, command=self.toggle_hide)
         self.sound_var = tk.BooleanVar(value=self.settings.get('sound', True))
         self.menu.add_checkbutton(label='提示音', variable=self.sound_var, command=self.toggle_sound)
+        # 状态栏语言：插件那边读 settings.json 的 lang，下一次刷新状态栏时生效
+        lang_menu = tk.Menu(self.menu, tearoff=0, font=self.font)
+        self.lang_var = tk.StringVar(value=self.settings.get('lang', 'auto'))
+        for value, label in (('auto', '跟随系统 / Auto'), ('zh', '中文'), ('en', 'English')):
+            lang_menu.add_radiobutton(label=label, variable=self.lang_var, value=value, command=self.set_lang)
+        self.menu.add_cascade(label='状态栏语言 / Language', menu=lang_menu)
         self.menu.add_separator()
         self.menu.add_command(label='退出桌宠', command=self.root.destroy)
 
@@ -463,6 +469,10 @@ class Pet:
 
     def toggle_sound(self):
         self.settings['sound'] = self.sound_var.get()
+        save_settings(self.settings)
+
+    def set_lang(self):
+        self.settings['lang'] = self.lang_var.get()
         save_settings(self.settings)
 
     # ---------- 鼠标 ----------

@@ -98,18 +98,44 @@ async function launchPet($: EngineInterface) {
   }
 }
 
+// 状态栏的中英文
+type Lang = 'zh' | 'en'
+const STATUS_TEXT = {
+  zh: { session: '当前会话', input: '输入', output: '输出', cacheHit: '缓存命中', context: '上下文', fiveHour: '5h额度' },
+  en: { session: 'Session:', input: 'input', output: 'output', cacheHit: 'cache hit', context: 'context', fiveHour: '5h limit' },
+}
+
+// 系统语言是中文就用中文，否则用英文
+const systemLang = (): Lang => {
+  try {
+    return /^zh/i.test(Intl.DateTimeFormat().resolvedOptions().locale) ? 'zh' : 'en'
+  } catch {
+    return 'zh'
+  }
+}
+
+// 语言：桌宠右键菜单里选的（存在 settings.json 的 lang），没选过就跟随系统
+async function statusLang($: EngineInterface): Promise<Lang> {
+  try {
+    const text = await $.fs.read(`${runDir}/settings.json`)
+    const lang = typeof text === 'string' ? JSON.parse(text).lang : undefined
+    if (lang === 'zh' || lang === 'en') return lang
+  } catch {}
+  return systemLang()
+}
+
 async function refreshStatus($: EngineInterface) {
   const t = (await readSession($)).totals
   const usage = await $.session.usage()
+  const s = STATUS_TEXT[await statusLang($)]
   const parts = [
-    `📊 本会话 输入 ${fmt(t.input + t.cacheRead + t.cacheWrite)}`,
-    `输出 ${fmt(t.output)}`,
-    `缓存命中 ${hitRate(t)}`,
+    `${s.session} ${s.input} ${fmt(t.input + t.cacheRead + t.cacheWrite)}`,
+    `${s.output} ${fmt(t.output)}`,
+    `${s.cacheHit} ${hitRate(t)}`,
   ]
-  if (usage.cost) parts.push(`$${usage.cost.usd.toFixed(2)}`)
-  if (usage.context.percent !== undefined) parts.push(`上下文 ${usage.context.percent}%`)
+  if (usage.context.percent !== undefined) parts.push(`${s.context} ${usage.context.percent}%`)
   const fiveHour = usage.rateLimits.find(r => r.kind === 'five_hour')
-  if (fiveHour) parts.push(`5h额度 ${fiveHour.percentUsed}%`)
+  if (fiveHour) parts.push(`${s.fiveHour} ${fiveHour.percentUsed}%`)
   $.ui.status(parts.join(' · '))
 }
 

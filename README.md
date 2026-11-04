@@ -22,11 +22,17 @@
 还有一个彩蛋：连续出错 3 次会……石化 🗿
 
 - **双击**桌宠：把 Claude 窗口叫到前台
-- **右键**菜单：调大小（小/中/大）、切到 Claude 时自动隐藏、提示音开关、退出
+- **右键**菜单：调大小（小/中/大）、切到 Claude 时自动隐藏、提示音开关、状态栏语言、退出
 
 **📊 Token 状态栏**：输入框下方常驻一行用量信息
 
-> 📊 本会话 输入 12.3k · 输出 4.1k · 缓存命中 87% · $0.42 · 上下文 31% · 5h额度 23%
+> 当前会话 输入 12.3k · 输出 4.1k · 缓存命中 87% · 上下文 31% · 5h额度 23%
+
+英文版：
+
+> Session: input 12.3k · output 4.1k · cache hit 87% · context 31% · 5h limit 23%
+
+默认跟随系统语言，也可以在桌宠右键菜单的「状态栏语言 / Language」里切换
 
 **🔔 提示音**：回复完播放钢琴"叮咚"，出错播放复古 RPG"哔哔"
 
@@ -73,7 +79,7 @@ claude plugin install desk-pet --marketplace BingXing-ai/claude-desk-pet
 - **换提示音**：替换 `sounds/done.wav`（完成）和 `sounds/error.wav`（出错）
 - **改台词**：气泡里的文字写在 `hooks/register.ts` 里
 
-桌宠的位置、大小和开关保存在 `~/.claude/desk-pet/settings.json`。
+桌宠的位置、大小、开关和状态栏语言（`lang`：`zh` / `en` / `auto`）保存在 `~/.claude/desk-pet/settings.json`。
 
 ## 说明
 
