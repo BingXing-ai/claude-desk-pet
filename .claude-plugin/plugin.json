@@ -1,5 +1,10 @@
 {
+<<<<<<< HEAD
   "name": "desk-pet",
   "version": "0.2.1",
+=======
+  "name": "Desk-Pet",
+  "version": "0.2.2",
+>>>>>>> 3244dca (状态栏用量改为每次模型请求后实时更新（v0.2.2）)
   "description": "Claude 娘桌宠悬浮窗 + Token/缓存命中率状态栏 + 完成提示音"
 }

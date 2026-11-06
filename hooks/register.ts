@@ -139,7 +139,7 @@ async function refreshStatus($: EngineInterface) {
   $.ui.status(parts.join(' · '))
 }
 
-// 把本轮用量记进会话累计和项目累计（项目累计跨会话保存）
+// 把一次请求的用量记进会话累计和项目累计（项目累计跨会话保存）；u 为空时只更新花费
 async function account($: EngineInterface, u: Usage | undefined) {
   const { totals: t, lastCost } = await readSession($)
   const add: Totals = u
@@ -168,6 +168,17 @@ async function account($: EngineInterface, u: Usage | undefined) {
     costUsd: p.costUsd + Math.max(0, cost - lastCost),
     sessions: p.sessions,
   })
+}
+
+// 每次模型请求结束就记一次账并刷新状态栏。记账排队执行：子代理并行时几个请求可能同时结束，
+// 同时读-改-写 $.store 会互相覆盖
+let accounting: Promise<void> = Promise.resolve()
+function recordUsage($: EngineInterface, u: Usage | undefined) {
+  accounting = accounting
+    .then(() => account($, u))
+    .then(() => refreshStatus($))
+    .catch(err => $.ui.log(`用量统计失败：${String(err)}`, { to: 'debug' }))
+  return accounting
 }
 
 async function statsText($: EngineInterface) {
@@ -248,14 +259,18 @@ export const register: Register = on => {
     return ran
   }).catch(($, e, next) => next(e)) // 桌宠这边出任何错，都照常放行工具调用
 
+  // 一轮里的每次模型请求（主循环和子代理都算）：响应完整收到后立刻记账，状态栏不用等整轮结束
+  // 只读结果、不改内容；记账出错只写调试日志，不影响模型回复
+  on('turn.step', async function* ($, e, next) {
+    const response = yield* next(e)
+    await recordUsage($, response.usage ?? undefined)
+    return response
+  })
+
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
-    try {
-      await account($, e.usage)
-      await refreshStatus($)
-    } catch (err) {
-      $.ui.log(`用量统计失败：${String(err)}`, { to: 'debug' })
-    }
+    // 用量已经在 turn.step 里按请求记过了（一轮的用量就是各次请求之和），这里只刷新额度和上下文
+    await recordUsage($, undefined)
 
     if (e.agentId !== undefined) return done
 
