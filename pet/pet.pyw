@@ -14,7 +14,7 @@ import time
 import tkinter as tk
 import winsound
 
-from PIL import Image, ImageTk
+from PIL import Image, ImageDraw, ImageFont
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 SOUNDS = os.path.join(os.path.dirname(HERE), 'sounds')
@@ -48,14 +48,124 @@ SPRITES = {
 }
 SIZES = {'小': 140, '中': 190, '大': 250}  # 角色高度（100% 缩放下的像素）
 IDLE_AFTER = 10 * 60  # 等你回复超过 10 分钟就开始发呆
-KEY = '#ff00fe'       # 透明色：画布上这个颜色的像素会被挖空
-EDGE = (58, 36, 26)   # 半透明边缘和这个深棕色混合，避免边缘发出洋红色的毛边
-ORANGE = '#e8743b'
+ORANGE = (232, 116, 59, 255)   # 气泡描边
+CREAM = (255, 250, 243, 255)   # 气泡底色
+INK = (58, 42, 26, 255)        # 气泡文字
+ANIMATED = {'thinking', 'tool', 'reading'}  # 这些状态下，台词末尾的“…”会变成跳动的点点点
+DOTS = '...'
+SS = 4  # 气泡先按 4 倍大小画再缩小，圆角和尾巴的边缘更平滑
+HOP = 14  # 换状态时跳起的高度
+BOB = 3   # 平时上下晃动的最大幅度
+GAP = 4   # 跳到最高时，头顶和气泡尖之间至少留这么多
 
 user32 = ctypes.windll.user32
 kernel32 = ctypes.windll.kernel32
+gdi32 = ctypes.windll.gdi32
 
 
+# ---------- 分层窗口（逐像素透明） ----------
+class BITMAPINFOHEADER(ctypes.Structure):
+    _fields_ = [('biSize', wt.DWORD), ('biWidth', wt.LONG), ('biHeight', wt.LONG), ('biPlanes', wt.WORD),
+                ('biBitCount', wt.WORD), ('biCompression', wt.DWORD), ('biSizeImage', wt.DWORD),
+                ('biXPelsPerMeter', wt.LONG), ('biYPelsPerMeter', wt.LONG), ('biClrUsed', wt.DWORD),
+                ('biClrImportant', wt.DWORD)]
+
+
+class BLENDFUNCTION(ctypes.Structure):
+    _fields_ = [('BlendOp', ctypes.c_ubyte), ('BlendFlags', ctypes.c_ubyte),
+                ('SourceConstantAlpha', ctypes.c_ubyte), ('AlphaFormat', ctypes.c_ubyte)]
+
+
+GWL_EXSTYLE = -20
+WS_EX_LAYERED = 0x00080000
+ULW_ALPHA = 2
+GA_ROOT = 2
+
+# 64 位 Python 下句柄是指针大小，必须声明类型，否则会被截断成 32 位
+user32.GetDC.restype = wt.HDC
+user32.GetDC.argtypes = [wt.HWND]
+user32.GetAncestor.restype = wt.HWND
+user32.GetAncestor.argtypes = [wt.HWND, wt.UINT]
+user32.GetWindowLongW.restype = wt.LONG
+user32.GetWindowLongW.argtypes = [wt.HWND, ctypes.c_int]
+user32.SetWindowLongW.restype = wt.LONG
+user32.SetWindowLongW.argtypes = [wt.HWND, ctypes.c_int, wt.LONG]
+user32.UpdateLayeredWindow.restype = wt.BOOL
+user32.UpdateLayeredWindow.argtypes = [wt.HWND, wt.HDC, ctypes.POINTER(wt.POINT), ctypes.POINTER(wt.SIZE), wt.HDC,
+                                       ctypes.POINTER(wt.POINT), wt.COLORREF, ctypes.POINTER(BLENDFUNCTION),
+                                       wt.DWORD]
+gdi32.CreateCompatibleDC.restype = wt.HDC
+gdi32.CreateCompatibleDC.argtypes = [wt.HDC]
+gdi32.CreateDIBSection.restype = wt.HBITMAP
+gdi32.CreateDIBSection.argtypes = [wt.HDC, ctypes.c_void_p, wt.UINT, ctypes.POINTER(ctypes.c_void_p), wt.HANDLE,
+                                   wt.DWORD]
+gdi32.SelectObject.restype = wt.HGDIOBJ
+gdi32.SelectObject.argtypes = [wt.HDC, wt.HGDIOBJ]
+gdi32.DeleteObject.argtypes = [wt.HGDIOBJ]
+
+
+class Layered:
+    """用 UpdateLayeredWindow 把一张 RGBA 图贴到窗口上：每个像素有自己的透明度，边缘不会有锯齿和毛边，
+    完全透明的地方鼠标还能直接点穿。"""
+
+    def __init__(self, widget):
+        self.widget = widget
+        self.screen = user32.GetDC(None)
+        self.dc = gdi32.CreateCompatibleDC(self.screen)
+        self.bits = ctypes.c_void_p()
+        self.bmp = self.old = None
+        self.size = (0, 0)
+
+    def hwnd(self):
+        # Tk 的顶层窗口是 winfo_id() 那个子窗口的外层；每次现取，防止 Tk 重建外层窗口后失效
+        return user32.GetAncestor(self.widget.winfo_id(), GA_ROOT)
+
+    def show(self, im):
+        hwnd = self.hwnd()
+        ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        if not ex & WS_EX_LAYERED:
+            user32.SetWindowLongW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED)
+        w, h = im.size
+        if (w, h) != self.size:
+            if self.bmp:
+                gdi32.SelectObject(self.dc, self.old)
+                gdi32.DeleteObject(self.bmp)
+            bmi = BITMAPINFOHEADER(ctypes.sizeof(BITMAPINFOHEADER), w, -h, 1, 32, 0, 0, 0, 0, 0, 0)  # 高度取负 = 从上往下存
+            self.bmp = gdi32.CreateDIBSection(self.screen, ctypes.byref(bmi), 0, ctypes.byref(self.bits), None, 0)
+            self.old = gdi32.SelectObject(self.dc, self.bmp)
+            self.size = (w, h)
+        data = im.tobytes('raw', 'BGRa')  # Windows 要的是 BGRA 顺序、颜色预乘透明度
+        ctypes.memmove(self.bits.value, data, len(data))
+        user32.UpdateLayeredWindow(hwnd, self.screen, None, ctypes.byref(wt.SIZE(w, h)), self.dc,
+                                   ctypes.byref(wt.POINT(0, 0)), 0, ctypes.byref(BLENDFUNCTION(0, 0, 255, 1)),
+                                   ULW_ALPHA)
+
+
+# ---------- 显示器 ----------
+class MONITORINFO(ctypes.Structure):
+    _fields_ = [('cbSize', wt.DWORD), ('rcMonitor', wt.RECT), ('rcWork', wt.RECT), ('dwFlags', wt.DWORD)]
+
+
+user32.MonitorFromPoint.restype = wt.HMONITOR
+user32.MonitorFromPoint.argtypes = [wt.POINT, wt.DWORD]
+user32.GetMonitorInfoW.restype = wt.BOOL
+user32.GetMonitorInfoW.argtypes = [wt.HMONITOR, ctypes.POINTER(MONITORINFO)]
+
+
+def monitor_at(x, y):
+    """返回 (x, y) 所在显示器（不在任何显示器上就取最近的那个）的 (整个屏幕, 去掉任务栏的工作区)，
+    都是 (左, 上, 右, 下)。"""
+    info = MONITORINFO()
+    info.cbSize = ctypes.sizeof(MONITORINFO)
+    mon = user32.MonitorFromPoint(wt.POINT(int(x), int(y)), 2)  # MONITOR_DEFAULTTONEAREST
+    if mon and user32.GetMonitorInfoW(mon, ctypes.byref(info)):
+        m, w = info.rcMonitor, info.rcWork
+        return (m.left, m.top, m.right, m.bottom), (w.left, w.top, w.right, w.bottom)
+    full = (0, 0, user32.GetSystemMetrics(0), user32.GetSystemMetrics(1))
+    return full, full
+
+
+# ---------- Claude 窗口 ----------
 def process_name(pid):
     h = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
     if not h:
@@ -105,6 +215,7 @@ def claude_running():
         return True
 
 
+# ---------- 设置和状态文件 ----------
 def load_settings():
     try:
         with open(SETTINGS, encoding='utf-8') as f:
@@ -140,17 +251,41 @@ def read_latest():
     return best
 
 
+# ---------- 画图 ----------
 def prepare(path, height):
-    """缩放立绘并把透明部分处理成透明色。"""
+    """缩放立绘。先换成预乘透明度再缩放，半透明的发丝边缘不会混进透明像素里的杂色。"""
     im = Image.open(path).convert('RGBA')
     w = round(im.width * height / im.height)
-    im = im.resize((w, height), Image.LANCZOS)
-    bg = Image.new('RGBA', im.size, EDGE + (255,))
-    solid = Image.alpha_composite(bg, im)
-    key = Image.new('RGBA', im.size, KEY)
-    mask = im.getchannel('A').point(lambda a: 255 if a >= 110 else 0)
-    key.paste(solid, (0, 0), mask)
-    return key.convert('RGB')
+    return im.convert('RGBa').resize((w, height), Image.LANCZOS).convert('RGBA')
+
+
+def load_font(px):
+    fonts = os.path.join(os.environ.get('WINDIR', r'C:\Windows'), 'Fonts')
+    for name, index in (('msyh.ttc', 1), ('msyh.ttc', 0), ('msyh.ttf', 0), ('simhei.ttf', 0)):
+        try:
+            return ImageFont.truetype(os.path.join(fonts, name), px, index=index)
+        except OSError:
+            continue
+    try:
+        return ImageFont.load_default(px)
+    except TypeError:  # Pillow 10.1 以前不支持指定大小
+        return ImageFont.load_default()
+
+
+def fit_text(text, max_w, measure):
+    """文字太长就从中间省略，保留开头（“在改”）和结尾（扩展名）。"""
+    if measure(text) <= max_w:
+        return text
+    head, tail = len(text) // 2, len(text) - len(text) // 2
+    while head + tail > 1:
+        if head >= tail:
+            head -= 1
+        else:
+            tail -= 1
+        cut = text[:head] + '…' + text[len(text) - tail:]
+        if measure(cut) <= max_w:
+            return cut
+    return '…'
 
 
 class Pet:
@@ -160,14 +295,12 @@ class Pet:
         self.root.title('Claude 桌宠')
         self.root.overrideredirect(True)
         self.root.attributes('-topmost', True)
-        self.root.attributes('-transparentcolor', KEY)
-        self.root.configure(bg=KEY)
         self.scale = self.root.winfo_fpixels('1i') / 96
 
-        self.canvas = tk.Canvas(self.root, bg=KEY, highlightthickness=0, bd=0)
+        # 画面全部由 Layered 贴上去，这个画布只用来接收鼠标事件
+        self.canvas = tk.Canvas(self.root, highlightthickness=0, bd=0)
         self.canvas.pack()
-        self.font = ('Microsoft YaHei UI', 10)
-        self.small = ('Microsoft YaHei UI', 8)
+        self.font = ('Microsoft YaHei UI', 10)  # 右键菜单用
 
         self.state, self.text, self.project = 'waiting', '我来啦～', ''
         self.state_since = time.time()
@@ -177,10 +310,13 @@ class Pet:
         self.hidden = False
         self.drag = None
         self.last_alive = time.time()
+        self.last_frame = None
 
         self.build()
         self.place_window()
         self.make_menu()
+        self.root.update_idletasks()
+        self.layer = Layered(self.root)
 
         self.canvas.bind('<ButtonPress-1>', self.on_press)
         self.canvas.bind('<B1-Motion>', self.on_drag)
@@ -195,36 +331,86 @@ class Pet:
 
     # ---------- 布局 ----------
     def build(self):
-        h = round(SIZES.get(self.settings.get('size', '中'), 190) * self.scale)
-        self.images = {}
-        for state, name in SPRITES.items():
-            self.images[state] = ImageTk.PhotoImage(prepare(os.path.join(HERE, 'sprites', name + '.png'), h))
+        s = self.scale
+        h = round(SIZES.get(self.settings.get('size', '中'), 190) * s)
+        self.sprites = {state: prepare(os.path.join(HERE, 'sprites', name + '.png'), h)
+                        for state, name in SPRITES.items()}
         self.char_h = h
-        self.char_w = max(img.width() for img in self.images.values())
-        self.bubble_h = round(52 * self.scale)
-        self.W = max(self.char_w, round(190 * self.scale))
-        self.H = self.bubble_h + round(8 * self.scale) + h + round(6 * self.scale)
+        self.char_w = max(im.width for im in self.sprites.values())
+        self.W = max(self.char_w, round(190 * s))
+        # 气泡在最上面，下面给跳跃和晃动留够空间，角色怎么动都碰不到气泡，也不会出窗口底边
+        self.bubble_bottom = round(38 * s)
+        self.tail_tip = self.bubble_bottom + round(10 * s)
+        self.rest_y = self.tail_tip + round((GAP + HOP + BOB) * s)  # 静止时立绘顶边的位置
+        self.H = self.rest_y + h + round(BOB * s)
+        self.pfont = load_font(round(10 * 96 / 72 * s))  # 10 磅
         self.canvas.config(width=self.W, height=self.H)
-        self.canvas.delete('all')
-        self.sprite = self.canvas.create_image(self.W // 2, self.H, anchor='s', image=self.images[self.state])
         self.draw_bubble()
 
     def draw_bubble(self):
-        c, s = self.canvas, self.scale
-        c.delete('bubble')
-        text = self.display_text()
-        tid = c.create_text(self.W // 2, round(20 * s), text=text, font=self.font, fill='#3a2a1a', tags='bubble')
-        x0, y0, x1, y1 = c.bbox(tid)
+        """按当前台词排好气泡：算出文字和气泡的位置，画好不带文字的气泡底图。"""
+        s, measure = self.scale, self.pfont.getlength
         pad = round(10 * s)
-        x0, x1 = max(1, x0 - pad), min(self.W - 2, x1 + pad)
-        y0, y1 = 2, round(38 * s)
+        max_w = self.W - 2 * pad - 4
+        state = self.effective_state()
+        text, self.dots_base = self.display_text(), None
+        if state in ANIMATED and (text.endswith('…') or text == '思考中'):
+            # 末尾的省略号换成一跳一跳的点点点；文字左对齐，按三个点的宽度留好位置，点数变化时文字不会左右晃
+            self.dots_base = fit_text(text.rstrip('…'), max_w - measure(DOTS), measure)
+            text = self.dots_base + DOTS
+        else:
+            text = fit_text(text, max_w, measure)
+        text_w = measure(text)
+        self.bubble_state = state
+        self.bubble_text = text
+        self.text_x = self.W / 2 - text_w / 2
+        x0 = max(1, math.floor(self.text_x) - pad)
+        x1 = min(self.W - 2, math.ceil(self.text_x + text_w) + pad)
+        self.bubble_bg = self.bubble_image(x0, x1)
+        self.bubble_cache = {}
+
+    def bubble_image(self, x0, x1):
+        s = self.scale
+        y0, y1, tip = 2, self.bubble_bottom, self.tail_tip
+        lw = max(2, round(2 * s))
         r = round(12 * s)
-        pts = [x0 + r, y0, x1 - r, y0, x1, y0, x1, y0 + r, x1, y1 - r, x1, y1, x1 - r, y1,
-               self.W // 2 + round(8 * s), y1, self.W // 2, y1 + round(10 * s), self.W // 2 - round(4 * s), y1,
-               x0 + r, y1, x0, y1, x0, y1 - r, x0, y0 + r, x0, y0]
-        c.create_polygon(pts, smooth=True, fill='#fffaf3', outline=ORANGE, width=max(2, round(2 * s)), tags='bubble')
-        c.tag_raise(tid)
-        self.bubble_text = tid
+        cx, half = self.W / 2, 6 * s
+        big = Image.new('RGBA', (self.W * SS, (tip + 2) * SS), (0, 0, 0, 0))
+        d = ImageDraw.Draw(big)
+
+        def k(*pts):
+            return [(x * SS, y * SS) for x, y in pts]
+
+        # 尾巴是个倒三角：先画橙色的外轮廓，再在里面画一个往里缩了一圈描边宽度的奶油色三角
+        slope = half / (tip - y1)                              # 尾巴斜边每往下 1 像素，往里收多少
+        inner_tip = tip - lw * math.hypot(1, slope) / slope    # 三角往里缩 lw 后，尖端上移的距离
+        top = y1 - lw                                          # 内三角的上边藏进气泡里，和底色连成一片
+        d.rounded_rectangle(k((x0, y0), (x1, y1)), radius=r * SS, fill=ORANGE)
+        d.polygon(k((cx - half - lw * slope, y1 - lw), (cx + half + lw * slope, y1 - lw), (cx, tip)), fill=ORANGE)
+        d.rounded_rectangle(k((x0 + lw, y0 + lw), (x1 - lw, y1 - lw)), radius=(r - lw) * SS, fill=CREAM)
+        d.polygon(k((cx - (inner_tip - top) * slope, top), (cx + (inner_tip - top) * slope, top), (cx, inner_tip)),
+                  fill=CREAM)
+        return big.convert('RGBa').resize((self.W, tip + 2), Image.BOX).convert('RGBA')
+
+    def bubble_with(self, text):
+        im = self.bubble_cache.get(text)
+        if im is None:
+            im = self.bubble_bg.copy()
+            ImageDraw.Draw(im).text((self.text_x, round(20 * self.scale)), text, font=self.pfont, fill=INK,
+                                    anchor='lm')
+            self.bubble_cache[text] = im
+        return im
+
+    def render(self, state, y, text):
+        key = (state, y, text, id(self.bubble_bg))
+        if key == self.last_frame:
+            return
+        self.last_frame = key
+        frame = Image.new('RGBA', (self.W, self.H), (0, 0, 0, 0))
+        sprite = self.sprites[state]
+        frame.alpha_composite(sprite, (self.W // 2 - sprite.width // 2, max(0, y)))
+        frame.alpha_composite(self.bubble_with(text), (0, 0))
+        self.layer.show(frame)
 
     def display_text(self):
         if self.effective_state() == 'idle':
@@ -236,11 +422,17 @@ class Pet:
             return 'idle'
         return self.state
 
-    def place_window(self):
-        sw, sh = self.root.winfo_screenwidth(), self.root.winfo_screenheight()
-        x = self.settings.get('x', sw - self.W - round(40 * self.scale))
-        y = self.settings.get('y', sh - self.H - round(70 * self.scale))
-        x, y = min(max(0, x), sw - 40), min(max(0, y), sh - 40)
+    def place_window(self, x=None, y=None):
+        if x is None:
+            x, y = self.settings.get('x'), self.settings.get('y')
+        if not isinstance(x, int) or not isinstance(y, int):
+            # 第一次打开：主显示器（坐标原点所在的那块）工作区的右下角
+            _, (left, top, right, bottom) = monitor_at(0, 0)
+            x, y = right - self.W - round(40 * self.scale), bottom - self.H
+        # 拉回到窗口中心所在（或最近）的那块显示器里，副屏拔掉之后也不会跑到看不见的地方
+        (left, top, right, bottom), _ = monitor_at(x + self.W // 2, y + self.H // 2)
+        x = min(max(left, x), right - self.W)
+        y = min(max(top, y), bottom - self.H)
         self.root.geometry(f'{self.W}x{self.H}+{x}+{y}')
 
     def make_menu(self):
@@ -254,6 +446,12 @@ class Pet:
         self.menu.add_checkbutton(label='切到 Claude 时自动隐藏', variable=self.hide_var, command=self.toggle_hide)
         self.sound_var = tk.BooleanVar(value=self.settings.get('sound', True))
         self.menu.add_checkbutton(label='提示音', variable=self.sound_var, command=self.toggle_sound)
+        # 状态栏语言：插件那边读 settings.json 的 lang，下一次刷新状态栏时生效
+        lang_menu = tk.Menu(self.menu, tearoff=0, font=self.font)
+        self.lang_var = tk.StringVar(value=self.settings.get('lang', 'auto'))
+        for value, label in (('auto', '跟随系统 / Auto'), ('zh', '中文'), ('en', 'English')):
+            lang_menu.add_radiobutton(label=label, variable=self.lang_var, value=value, command=self.set_lang)
+        self.menu.add_cascade(label='状态栏语言 / Language', menu=lang_menu)
         self.menu.add_separator()
         self.menu.add_command(label='退出桌宠', command=self.root.destroy)
 
@@ -263,7 +461,7 @@ class Pet:
         bottom_x = self.root.winfo_x() + self.W // 2
         bottom_y = self.root.winfo_y() + self.H
         self.build()
-        self.root.geometry(f'{self.W}x{self.H}+{bottom_x - self.W // 2}+{bottom_y - self.H}')
+        self.place_window(bottom_x - self.W // 2, bottom_y - self.H)  # 脚底位置不变，变大后超出屏幕就挪回来
 
     def toggle_hide(self):
         self.settings['hideOnFocus'] = self.hide_var.get()
@@ -271,6 +469,10 @@ class Pet:
 
     def toggle_sound(self):
         self.settings['sound'] = self.sound_var.get()
+        save_settings(self.settings)
+
+    def set_lang(self):
+        self.settings['lang'] = self.lang_var.get()
         save_settings(self.settings)
 
     # ---------- 鼠标 ----------
@@ -316,10 +518,8 @@ class Pet:
                     pass
             if changed:
                 self.hop_at = time.time()
-            self.canvas.itemconfig(self.sprite, image=self.images[self.effective_state()])
             self.draw_bubble()
-        elif self.effective_state() == 'idle' and self.canvas.itemcget(self.sprite, 'image') != str(self.images['idle']):
-            self.canvas.itemconfig(self.sprite, image=self.images['idle'])
+        elif self.effective_state() != self.bubble_state:  # 等太久，进入发呆
             self.draw_bubble()
         self.root.after(250, self.poll)
 
@@ -336,11 +536,14 @@ class Pet:
         else:
             bob = 3 * math.sin(t * 2.2)   # 平时：慢慢呼吸
         since = t - self.hop_at
-        hop = -14 * math.sin(since / 0.28 * math.pi) if since < 0.28 else 0  # 换状态时小跳一下
-        self.canvas.coords(self.sprite, self.W // 2, self.H + round((bob + hop) * s) - round(4 * s))
-        if st == 'thinking' and self.text.endswith('中'):
-            # “思考中” 后面的点点点一跳一跳
-            self.canvas.itemconfig(self.bubble_text, text=self.text + '.' * (int(t * 2.5) % 3 + 1))
+        hop = -HOP * math.sin(since / 0.28 * math.pi) if since < 0.28 else 0  # 换状态时小跳一下
+        y = self.rest_y + round((bob + hop) * s)
+        text = self.bubble_text
+        if self.dots_base is not None:
+            # “思考中…” 这类进行中的台词，后面的点点点一跳一跳
+            text = self.dots_base + '.' * (int(t * 2.5) % 3 + 1)
+        if not self.hidden:
+            self.render(st, y, text)
         self.root.after(33, self.animate)
 
     def watch_focus(self):
@@ -352,6 +555,7 @@ class Pet:
             self.root.deiconify()
             self.root.attributes('-topmost', True)
             self.hidden = False
+            self.last_frame = None  # 重新显示后强制重画一帧
         self.root.after(300, self.watch_focus)
 
     def watch_claude(self):

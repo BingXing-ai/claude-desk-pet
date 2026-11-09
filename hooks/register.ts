@@ -54,9 +54,17 @@ const describe = (tool: string, input: Record<string, unknown>) => {
   if (tool === 'Read') return file ? `在读 ${file}` : '在翻文件…'
   if (tool === 'Grep' || tool === 'Glob') return '在找东西…'
   if (tool === 'WebSearch' || tool === 'WebFetch') return '在上网查…'
-  if (tool === 'Agent') return '派小助手干活中'
-  if (tool.startsWith('mcp__')) return `在用 ${tool.split('__').pop()}`
-  return `在用 ${tool}`
+  if (tool === 'Agent' || tool === 'Task') return '派小助手干活中…'
+  if (tool.startsWith('mcp__')) return describeMcp(tool)
+  return `在用 ${tool}…`
+}
+
+// MCP 工具名形如 mcp__<服务名>__<工具名>，服务名有时是一串 id，直接显示不好看
+const describeMcp = (tool: string) => {
+  const [, server = '', name = ''] = tool.split('__')
+  if (/browser|chrome|playwright|puppeteer/i.test(server)) return '在操作浏览器…'
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-/i.test(server) || !server) return name ? `在用 ${name}…` : '在用扩展工具…'
+  return `在用 ${server}…`
 }
 
 async function readSession($: EngineInterface) {
@@ -90,22 +98,48 @@ async function launchPet($: EngineInterface) {
   }
 }
 
+// 状态栏的中英文
+type Lang = 'zh' | 'en'
+const STATUS_TEXT = {
+  zh: { session: '当前会话', input: '输入', output: '输出', cacheHit: '缓存命中', context: '上下文', fiveHour: '5h额度' },
+  en: { session: 'Session', input: 'Input', output: 'Output', cacheHit: 'Cache hit', context: 'Context', fiveHour: '5h Limit' },
+}
+
+// 系统语言是中文就用中文，否则用英文
+const systemLang = (): Lang => {
+  try {
+    return /^zh/i.test(Intl.DateTimeFormat().resolvedOptions().locale) ? 'zh' : 'en'
+  } catch {
+    return 'zh'
+  }
+}
+
+// 语言：桌宠右键菜单里选的（存在 settings.json 的 lang），没选过就跟随系统
+async function statusLang($: EngineInterface): Promise<Lang> {
+  try {
+    const text = await $.fs.read(`${runDir}/settings.json`)
+    const lang = typeof text === 'string' ? JSON.parse(text).lang : undefined
+    if (lang === 'zh' || lang === 'en') return lang
+  } catch {}
+  return systemLang()
+}
+
 async function refreshStatus($: EngineInterface) {
   const t = (await readSession($)).totals
   const usage = await $.session.usage()
+  const s = STATUS_TEXT[await statusLang($)]
   const parts = [
-    `📊 本会话 输入 ${fmt(t.input + t.cacheRead + t.cacheWrite)}`,
-    `输出 ${fmt(t.output)}`,
-    `缓存命中 ${hitRate(t)}`,
+    `${s.session} ${s.input} ${fmt(t.input + t.cacheRead + t.cacheWrite)}`,
+    `${s.output} ${fmt(t.output)}`,
+    `${s.cacheHit} ${hitRate(t)}`,
   ]
-  if (usage.cost) parts.push(`$${usage.cost.usd.toFixed(2)}`)
-  if (usage.context.percent !== undefined) parts.push(`上下文 ${usage.context.percent}%`)
+  if (usage.context.percent !== undefined) parts.push(`${s.context} ${usage.context.percent}%`)
   const fiveHour = usage.rateLimits.find(r => r.kind === 'five_hour')
-  if (fiveHour) parts.push(`5h额度 ${fiveHour.percentUsed}%`)
+  if (fiveHour) parts.push(`${s.fiveHour} ${fiveHour.percentUsed}%`)
   $.ui.status(parts.join(' · '))
 }
 
-// 把本轮用量记进会话累计和项目累计（项目累计跨会话保存）
+// 把一次请求的用量记进会话累计和项目累计（项目累计跨会话保存）；u 为空时只更新花费
 async function account($: EngineInterface, u: Usage | undefined) {
   const { totals: t, lastCost } = await readSession($)
   const add: Totals = u
@@ -134,6 +168,17 @@ async function account($: EngineInterface, u: Usage | undefined) {
     costUsd: p.costUsd + Math.max(0, cost - lastCost),
     sessions: p.sessions,
   })
+}
+
+// 每次模型请求结束就记一次账并刷新状态栏。记账排队执行：子代理并行时几个请求可能同时结束，
+// 同时读-改-写 $.store 会互相覆盖
+let accounting: Promise<void> = Promise.resolve()
+function recordUsage($: EngineInterface, u: Usage | undefined) {
+  accounting = accounting
+    .then(() => account($, u))
+    .then(() => refreshStatus($))
+    .catch(err => $.ui.log(`用量统计失败：${String(err)}`, { to: 'debug' }))
+  return accounting
 }
 
 async function statsText($: EngineInterface) {
@@ -186,7 +231,7 @@ export const register: Register = on => {
   on('turn.start', async ($, e, next) => {
     if (e.agentId === undefined) {
       toolErrors = 0
-      await pet($, 'thinking', '思考中')
+      await pet($, 'thinking', '思考中…')
     }
     return next(e)
   })
@@ -208,20 +253,24 @@ export const register: Register = on => {
         else await pet($, 'error', '出错了…')
       } else {
         toolErrors = 0
-        await pet($, 'thinking', '思考中')
+        await pet($, 'thinking', '思考中…')
       }
     }
     return ran
   }).catch(($, e, next) => next(e)) // 桌宠这边出任何错，都照常放行工具调用
 
+  // 一轮里的每次模型请求（主循环和子代理都算）：响应完整收到后立刻记账，状态栏不用等整轮结束
+  // 只读结果、不改内容；记账出错只写调试日志，不影响模型回复
+  on('turn.step', async function* ($, e, next) {
+    const response = yield* next(e)
+    await recordUsage($, response.usage ?? undefined)
+    return response
+  })
+
   on('turn.complete', async ($, e, next) => {
     const done = await next(e)
-    try {
-      await account($, e.usage)
-      await refreshStatus($)
-    } catch (err) {
-      $.ui.log(`用量统计失败：${String(err)}`, { to: 'debug' })
-    }
+    // 用量已经在 turn.step 里按请求记过了（一轮的用量就是各次请求之和），这里只刷新额度和上下文
+    await recordUsage($, undefined)
 
     if (e.agentId !== undefined) return done
 
